@@ -3,7 +3,6 @@
 // See the LICENSE file in the project root for more information.
 
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 using System.Text.Utf8.Resources;
 
 // TODO: Make this struct serializable.
@@ -87,18 +86,18 @@ namespace System.Text
         /// Returns true iff this scalar value is ASCII ([ U+0000..U+007F ])
         /// and therefore representable by a single UTF-8 code unit.
         /// </summary>
-        public bool IsAscii => (_value < 0x80U);
+        public bool IsAscii => UnicodeHelpers.IsAsciiCodePoint(_value);
 
         /// <summary>
         /// Returns true iff this scalar value is within the BMP ([ U+0000..U+FFFF ])
         /// and therefore representable by a single UTF-16 code unit.
         /// </summary>
-        public bool IsBmp => (_value < 10000U);
+        public bool IsBmp => UnicodeHelpers.IsBmpCodePoint(_value);
 
         /// <summary>
         /// A <see cref="UnicodeScalar"/> instance that represents the Unicode replacement character U+FFFD.
         /// </summary>
-        public static UnicodeScalar ReplacementChar => DangerousCreateWithoutValidation(0xFFFD);
+        public static UnicodeScalar ReplacementChar => DangerousCreateWithoutValidation(UnicodeHelpers.ReplacementChar);
 
         /// <summary>
         /// Returns the length in code units (<see cref="Char"/>) of the
@@ -107,15 +106,7 @@ namespace System.Text
         /// <remarks>
         /// The return value will be 1 or 2.
         /// </remarks>
-        public int Utf16SequenceLength
-        {
-            get
-            {
-                // If _value <  0x10000, returns (-1) + 2 = 1
-                // If _value >= 0x10000, returns   0  + 2 = 2
-                return (((int)_value - 0x10000) >> 31) + 2;
-            }
-        }
+        public int Utf16SequenceLength => UnicodeHelpers.GetUtf16SequenceLength(_value);
 
         /// <summary>
         /// Returns the length in code units (<see cref="Utf8Char"/>) of the
@@ -124,7 +115,7 @@ namespace System.Text
         /// <remarks>
         /// The return value will be 1 through 4, inclusive.
         /// </remarks>
-        public int Utf8SequenceLength => throw null;
+        public int Utf8SequenceLength => UnicodeHelpers.GetUtf8SequenceLength(_value);
 
         /// <summary>
         /// Returns the Unicode scalar value as an unsigned integer.
@@ -183,7 +174,28 @@ namespace System.Text
         /// Thrown if <paramref name="output"/> is too short to contain the output.
         /// The required length can be queried ahead of time via the <see cref="Utf16SequenceLength"/> property.
         /// </exception>
-        public int ToUtf16(Span<char> output) => throw null;
+        public int ToUtf16(Span<char> output)
+        {
+            if (IsBmp && output.Length > 0)
+            {
+                output[0] = (char)_value;
+                return 1;
+            }
+            else if (output.Length > 1)
+            {
+                // TODO: This logic can be optimized into a single unaligned write, endianness-dependent.
+
+                output[0] = (char)((_value >> 10) + 0xD800U - 0x40U); // high surrogate
+                output[1] = (char)((_value & 0x3FFFU) + 0xDC00U); // low surrogate
+                return 2;
+            }
+            else
+            {
+                throw new ArgumentException(
+                    message: Strings.Argument_OutputBufferTooSmall,
+                    paramName: nameof(output));
+            }
+        }
 
         /// <summary>
         /// Writes this scalar value as a UTF-8 sequence to the output buffer, returning
@@ -193,7 +205,47 @@ namespace System.Text
         /// Thrown if <paramref name="output"/> is too short to contain the output.
         /// The required length can be queried ahead of time via the <see cref="Utf8SequenceLength"/> property.
         /// </exception>
-        public int ToUtf8(Span<Utf8Char> output) => throw null;
+        public int ToUtf8(Span<Utf8Char> output)
+        {
+            // TODO: This logic can be optimized into fewer unaligned writes, endianness-dependent.
+            // TODO: Consider using BMI2 (pext, pdep) when it comes online.
+            // TODO: Consider using hardware-accelerated byte swapping (bswap, movbe) if available.
+
+            var outputAsBytes = output.AsBytes();
+
+            if (IsAscii && output.Length > 0)
+            {
+                outputAsBytes[0] = (byte)_value;
+                return 1;
+            }
+            else if (_value < 0x800U && output.Length > 1)
+            {
+                outputAsBytes[0] = (byte)((_value >> 6) + 0xC0U);
+                outputAsBytes[1] = (byte)((_value & 0x3FU) + 0x80U);
+                return 2;
+            }
+            else if (_value < 0x10000U && output.Length > 2)
+            {
+                outputAsBytes[0] = (byte)((_value >> 12) + 0xE0U);
+                outputAsBytes[1] = (byte)(((_value >> 6) & 0x3FU) + 0x80U);
+                outputAsBytes[2] = (byte)((_value & 0x3FU) + 0x80U);
+                return 3;
+            }
+            else if (output.Length > 3)
+            {
+                outputAsBytes[0] = (byte)((_value >> 18) + 0xF0U);
+                outputAsBytes[1] = (byte)(((_value >> 12) & 0x3FU) + 0x80U);
+                outputAsBytes[2] = (byte)(((_value >> 6) & 0x3FU) + 0x80U);
+                outputAsBytes[3] = (byte)((_value & 0x3FU) + 0x80U);
+                return 4;
+            }
+            else
+            {
+                throw new ArgumentException(
+                    message: Strings.Argument_OutputBufferTooSmall,
+                    paramName: nameof(output));
+            }
+        }
 
         /// <summary>
         /// Returns a <see cref="Utf8String"/> representation of this <see cref="UnicodeScalar"/> instance.
